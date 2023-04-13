@@ -71,7 +71,8 @@ dict_sources = {
     "Yandex Satellite": {"url":"https://core-sat.maps.yandex.net/tiles?l=sat&v=3.1016.0&x={0}&y={1}&z={2}&scale=1.5&lang=ru_RU", "zmax":19},
     "Bing BaseMap": {"url":"https://t0.ssl.ak.dynamic.tiles.virtualearth.net/comp/ch/{0}?mkt=ru-RU&it=G,LC,BX,RL&shading=t&n=z&og=1852&cstl=vbp2&o=jpeg", "zmax":19},
     "Bing Satellite": {"url":"https://t1.ssl.ak.tiles.virtualearth.net/tiles/a{0}.jpeg?g=12225&n=z&prx=1", "zmax":18},
-    "Bing Hybrid": {"url":"https://t1.ssl.ak.dynamic.tiles.virtualearth.net/comp/ch/{0}?mkt=ru-RU&it=A,G,RL&shading=t&n=z&og=1852&o=jpeg", "zmax":18}
+    "Bing Hybrid": {"url":"https://t1.ssl.ak.dynamic.tiles.virtualearth.net/comp/ch/{0}?mkt=ru-RU&it=A,G,RL&shading=t&n=z&og=1852&o=jpeg", "zmax":18},
+    "MapZen": {"url":"https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{2}/{0}/{1}.png", "zmax":18},
 }
 
 
@@ -197,9 +198,13 @@ class rband(QgsMapToolEmitPoint):
         self.canvas = canvas
         self.app = app
         self.isEmittingPoint = False
+        self.start_pos_x = None
+        self.start_pos_y = None
+        self.end_pos_x = None
+        self.end_pos_y = None
         
         QgsMapToolEmitPoint.__init__(self, self.canvas)
-        self.rubberBand = QgsRubberBand(self.canvas, True)
+        self.rubberBand = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
         self.rubberBand.setColor(QColor(55,150,200,150))
         self.rubberBand.setWidth(3)
         self.rubberBand.reset()
@@ -241,6 +246,13 @@ class rband(QgsMapToolEmitPoint):
         ]
         polygon_coors = [QgsPointXY(p[0], p[1]) for p in pnts]
         geom_polygon = QgsGeometry().fromPolygonXY([polygon_coors])
+        
+        self.start_pos_x = min(pnts, key=lambda v: v[0])[0]
+        self.start_pos_y = max(pnts, key=lambda v: v[1])[1]
+
+        self.end_pos_x = max(pnts, key=lambda v: v[0])[0]
+        self.end_pos_y = min(pnts, key=lambda v: v[1])[1]
+
         self.rubberBand.setToGeometry(geom_polygon)
         
     def deactivate(self):
@@ -404,8 +416,10 @@ class MapTileLoader(QWidget):
     def rband_coors(self):
         # transforming rectangle coordinates into project crs
         if self.draw_tool:
-            pnt_start = self.draw_tool.startPoint 
-            pnt_end = self.draw_tool.endPoint
+            pnt_start = QgsPointXY(self.draw_tool.start_pos_x, self.draw_tool.start_pos_y)
+            pnt_end = QgsPointXY(self.draw_tool.end_pos_x, self.draw_tool.end_pos_y) 
+            # print('old', self.draw_tool.startPoint, self.draw_tool.endPoint)
+            # print('new', pnt_start, pnt_end)
             pnt_geom_start = QgsGeometry().fromPointXY(pnt_start)
             pnt_geom_end  = QgsGeometry().fromPointXY(pnt_end)
             
@@ -572,6 +586,7 @@ class MapTileLoader(QWidget):
                 self.draw_tool.showRect(start_point_projected, end_point_projected)
                 self.draw_tool.startPoint = start_point_projected
                 self.draw_tool.endPoint = end_point_projected
+            self.activate_dl()
 
         return
             
