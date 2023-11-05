@@ -505,12 +505,12 @@ class MapTileLoader(QWidget):
                 self.pbar.setValue(step_counter)
                 
                 request = session.get(lnk_download, headers=headers)
-                if request.status_code == 404:
-                    img = Image.new("RGB", (256, 256), (255, 255, 255))
-                    img.save(file_out, "JPEG")
-                else:
+                if request.status_code == 200:
                     with open(file_out, 'wb') as out:
                         out.write(request.content)
+                else:
+                    img = Image.new("RGB", (256, 256), (255, 255, 255))
+                    img.save(file_out, "JPEG")
                 time.sleep(.2)
                 files_list.append(file_out)
                 
