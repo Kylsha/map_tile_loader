@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+	# -*- coding: utf-8 -*-
 """
 /***************************************************************************
  TileLoaderDialog
@@ -25,13 +25,15 @@
 import os
 import math 
 import requests 
-import time 
 import json
- 
+import time 
+
 from osgeo import gdal, osr
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = None
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 
-from PyQt5.QtWidgets import QApplication, QWidget, QComboBox, QHBoxLayout, QLineEdit, QGridLayout, QLabel, QPushButton, \
+from PyQt5.QtWidgets import QWidget, QComboBox, QLineEdit, QGridLayout, QLabel, QPushButton, \
     QMessageBox, QProgressBar, QCheckBox, QSpinBox, QFileDialog
 
 from PyQt5 import QtCore
@@ -41,13 +43,13 @@ from PyQt5.QtCore import *
 from qgis._core import *
 from qgis.utils import iface
 from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsMapTool
-from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsPoint, QgsFeature, QgsGeometry, QgsVectorLayer, QgsPointXY, QgsRasterLayer
+from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsGeometry, QgsPointXY, QgsRasterLayer
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 
-
 current_folder = (os.path.dirname(os.path.realpath(__file__)))
 cfg_file = os.path.join(current_folder, 'cfg.json')
+global_counter = 0
 
 headers = {
     'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
@@ -56,6 +58,7 @@ headers = {
     'accept-language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7,uk;q=0.6'
 }
 out_format = 'jpeg'
+large_pic_warning_message = 'Image dimensions will be:\n • width: {}\n • height: {}\n\nFile size may be too big. To reduce size you may change zoom level.\n\nAre you sure you want to continue?'
 
 # I had to remove OSM url due to their request. 
 # You are free to edit this dict to get tiles from another sources
@@ -63,19 +66,19 @@ dict_sources = {
     "Google BaseMap": {"url":"https://mt1.google.com/vt/lyrs=m&x={0}&y={1}&z={2}", "zmax":21},
     "Google Terrain": {"url":"https://mt1.google.com/vt/lyrs=p&x={0}&y={1}&z={2}", "zmax":20},
     "Google Traffic": {"url":"https://mt1.google.com/vt?lyrs=h@159000000,traffic|seconds_into_week:-1&style=3&x={0}&y={1}&z={2}", "zmax":20},
-    "Google Satellite": {"url":"https://khms0.google.com/kh/v=923?x={0}&y={1}&z={2}", "zmax":20},
+    "Google Satellite": {"url":"https://mt1.google.com/vt/lyrs=s&x={0}&y={1}&z={2}", "zmax":20},
     "Google Hybrid": {"url":"https://mt1.google.com/vt/lyrs=y&x={0}&y={1}&z={2}", "zmax":20},
     "ESRI BaseMap": {"url":"https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{2}/{1}/{0}", "zmax":20},
     "ESRI Terrain": {"url":"https://server.arcgisonline.com/ArcGIS/rest/services/World_Terrain_Base/MapServer/tile/{2}/{1}/{0}", "zmax":20},
     "ESRI Satellite": {"url":"https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{2}/{1}/{0}", "zmax":20},
     "Yandex BaseMap": {"url":"https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=21.07.13-0-b210701140430&x={0}&y={1}&z={2}&scale=1&lang=ru_RU", "zmax":21},
-    "Yandex Satellite": {"url":"https://core-sat.maps.yandex.net/tiles?l=sat&v=3.1016.0&x={0}&y={1}&z={2}&scale=1.5&lang=ru_RU", "zmax":19},
+    "Yandex Satellite": {"url":"https://core-sat.maps.yandex.net/tiles?l=sat&v=3.1105.0&x={0}&y={1}&z={2}&scale=1.5&lang=ru_RU", "zmax":21},
     "Bing BaseMap": {"url":"https://t0.ssl.ak.dynamic.tiles.virtualearth.net/comp/ch/{0}?mkt=ru-RU&it=G,LC,BX,RL&shading=t&n=z&og=1852&cstl=vbp2&o=jpeg", "zmax":19},
     "Bing Satellite": {"url":"https://t1.ssl.ak.tiles.virtualearth.net/tiles/a{0}.jpeg?g=12225&n=z&prx=1", "zmax":18},
     "Bing Hybrid": {"url":"https://t1.ssl.ak.dynamic.tiles.virtualearth.net/comp/ch/{0}?mkt=ru-RU&it=A,G,RL&shading=t&n=z&og=1852&o=jpeg", "zmax":18},
     "MapZen": {"url":"https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{2}/{0}/{1}.png", "zmax":18},
+    "OSM": {"url":"https://tile.openstreetmap.org/{2}/{0}/{1}.png", "zmax":20},
 }
-
 
 
 def write_cfg(folder, zoom, source):
@@ -227,7 +230,6 @@ class rband(QgsMapToolEmitPoint):
     def canvasReleaseEvent(self, e):
         # finish rectangle, miximize main widget
         self.isEmittingPoint = False
-        canvasGeom = self.rubberBand.asGeometry()
         self.app.setWindowState(Qt.WindowNoState)
         self.app.btn_save_frame.setDisabled(False)
         self.app.activate_dl()
@@ -299,7 +301,7 @@ class MapTileLoader(QWidget):
         self.btn_load = QPushButton("Download")
         self.add_checkbox = QCheckBox("Add image on load")
         
-        self.pbar = QProgressBar()
+        self.pbar = QProgressBar(self)
         
         # setting up interface
         self.grid.addWidget(self.label_source,       0, 1, 1, 5)
@@ -337,10 +339,17 @@ class MapTileLoader(QWidget):
         self.add_checkbox.setChecked(True)
         self.btn_save_frame.setDisabled(True)
         self.btn_load.setDisabled(True)
-        
+
         self.proj_transforms()
         self.set_config()
         self.show()
+
+
+    def ready_message(self, info_text):
+        # custom information message
+        msg = QMessageBox()
+        msg.information(self, "Success!", info_text)
+        return
 
 
     def warning_message(self, err_text):
@@ -349,7 +358,16 @@ class MapTileLoader(QWidget):
         msg.warning(self, "Warning", err_text)
         return
     
-
+    def warning_question(self, w, h):
+        dlg = QtWidgets.QMessageBox(self) 
+        dlg.setWindowTitle('Large output size warning')
+        dlg.setText(large_pic_warning_message.format(int(round(w)), int(round(h))))
+        dlg.setStandardButtons(QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Yes)
+        dlg.button(QtWidgets.QMessageBox.Yes).setText("Continue")
+        dlg.button(QtWidgets.QMessageBox.No).setText("Cancel")
+        return dlg.exec_()  
+    
+    
     def set_config(self):
         # set config on previous use
         config = read_cfg()
@@ -407,10 +425,13 @@ class MapTileLoader(QWidget):
     
     
     def proj_transforms(self):
+        # set crs transforms
         current_crs = QgsProject.instance().crs() 
         sourceCrs = QgsCoordinateReferenceSystem(current_crs)
         destCrs = QgsCoordinateReferenceSystem(4326)
+        destCrs_3857 = QgsCoordinateReferenceSystem(3857)
         self.tr = QgsCoordinateTransform(sourceCrs, destCrs, QgsProject.instance())
+        self.tr_3857 = QgsCoordinateTransform(destCrs, destCrs_3857, QgsProject.instance())
         self.tr_reversed = QgsCoordinateTransform(destCrs, sourceCrs , QgsProject.instance())
 
 
@@ -419,8 +440,6 @@ class MapTileLoader(QWidget):
         if self.draw_tool:
             pnt_start = QgsPointXY(self.draw_tool.start_pos_x, self.draw_tool.start_pos_y)
             pnt_end = QgsPointXY(self.draw_tool.end_pos_x, self.draw_tool.end_pos_y) 
-            # print('old', self.draw_tool.startPoint, self.draw_tool.endPoint)
-            # print('new', pnt_start, pnt_end)
             pnt_geom_start = QgsGeometry().fromPointXY(pnt_start)
             pnt_geom_end  = QgsGeometry().fromPointXY(pnt_end)
             
@@ -436,56 +455,148 @@ class MapTileLoader(QWidget):
             self.get_raster(self.pnt_geom_start, self.pnt_geom_end, self.zoom_slider.value())
 
 
+    def download_image(self, session, url, path_file):
+        # tile load
+        attempts = 0
+        while True:
+            if attempts == 10:
+                break 
+            try:
+                request = session.get(url, headers=headers, timeout=2, verify=False)
+                if request.status_code == 200:
+                    with open(path_file, 'wb') as out:
+                        out.write(request.content)
+                    break
+                else:
+                    return path_file
+
+            except:
+                attempts+=1
+                time.sleep(1)
+        return path_file
+
+    
+    def fetch(self, session, url, path_file):
+        # tile download
+        self.download_image(session, url, path_file)
+        return 
+
+   
+    def stitch_image(self, list_images, img):
+        # open each tile and collect them on PIL canvas
+        for img_data in list_images:
+            off_x = img_data[0]
+            off_y = img_data[1]
+            t_height = img_data[2]
+            img_path = img_data[3]
+            if os.path.isfile(img_path):
+                im_saved = Image.open(img_path)
+                img.paste(im_saved, (off_x, t_height-off_y))
+        return 
+
+
     def get_raster(self, pnt_start, pnt_end, zoom):
-        # get tiles and stitch them into one georeferenced image
+        # get tiles and stitch them into single georeferenced image
+        tileSize = 256
+        img_size_limit = 20000
+        current_source = self.source_cmbx.currentText()
+
         folder_valid = self.check_folder()
         if not folder_valid:
             self.warning_message("Folder does not exist")
             return
+        
+        # output filename will contain only datetime instead of coordinates
+        current_datetime = time.localtime()
+        str_datetime = time.strftime("%Y-%m-%d_%H-%M-%S", current_datetime)
+        f_name_pref = '{}'.format(str_datetime)
+
+        # filenames and paths
+        tile_url = dict_sources[current_source]['url']
+        file_pil = os.path.join(self.work_folder, 'pil_img.jpeg')
+        file_pil_clip = os.path.join(self.work_folder, 'pil_img_clip.jpeg')
+        final_file_out = os.path.join(self.work_folder,'{}_{}.tif'.format(current_source, f_name_pref))
+
 
         lon_start, lat_start = pnt_start.asPoint().x(), pnt_start.asPoint().y()
         lon_end, lat_end = pnt_end.asPoint().x(), pnt_end.asPoint().y()
-        f_name_pref = '{}-{}-{}-{}'.format(round(lon_start, 2), round(lat_start, 2),round(lon_end, 2), round(lat_end, 2)).replace('.', '_')
-        
-        tileSize = 256
-        current_source = self.source_cmbx.currentText()
-        tile_url = dict_sources[current_source]['url']
 
-        file_pil = os.path.join(self.work_folder, 'pil_img.jpeg')
-        final_file_out = os.path.join(self.work_folder,'{}_{}_pre_clip.tif'.format(current_source, f_name_pref))
-        final_file_out_cropped = os.path.join(self.work_folder,'{}_{}.tif'.format(current_source, f_name_pref))
+        # copies of rband points to convert them into 3857
+        pnt_copy_start = QgsGeometry().fromPointXY(QgsPointXY(pnt_start.asPoint().x(), pnt_start.asPoint().y()))
+        pnt_copy_end = QgsGeometry().fromPointXY(QgsPointXY(pnt_end.asPoint().x(), pnt_end.asPoint().y()))
+        pnt_copy_start.transform(self.tr_3857)
+        pnt_copy_end.transform(self.tr_3857)
+
+        # 3857 coordinates for georeferencing picture
+        # there are two reasons for that:
+        # 1 - result image can be opened with original appearance in viewers/editors
+        # 2 - raster layer will be displayed in better quality rather than
+        # if it was georeferenced with degrees (EPSG:4326)
+        lon_start_3857, lat_start_3857 = pnt_copy_start.asPoint().x(), pnt_copy_start.asPoint().y()
+        lon_end_3857, lat_end_3857 = pnt_copy_end.asPoint().x(), pnt_copy_end.asPoint().y()
         
-        # yandex
+        # yandex is projected in 3395
         if 'yandex' in current_source.lower():
             lon_start, lat_start = yandex_coor_convert(lon_start, lat_start)
             lon_end, lat_end = yandex_coor_convert(lon_end, lat_end)
 
+        # coordinates of tiles
         xy_start = getxy(lon_start, lat_start, zoom, tileSize)
         xy_end = getxy(lon_end, lat_end, zoom, tileSize)
-
-        dt = getxy_reverse(xy_start[0], xy_start[1], zoom, 256)
-        et = getxy_reverse(xy_end[0]+1, xy_end[1]+1, zoom, 256)
 
         # yandex
         if 'yandex' in current_source.lower():
             dt = yandex_coor_convert_reverse(xy_start[0], xy_start[1], zoom)
             et = yandex_coor_convert_reverse(xy_end[0]+1, xy_end[1]+1, zoom)
+
+        # degrees coordinates of tiles
+        dt = getxy_reverse(xy_start[0], xy_start[1], zoom, 256)
+        et = getxy_reverse(xy_end[0]+1, xy_end[1]+1, zoom, 256)
         
+        # width and height of rband in degrees and 
+        # ratios to get crop coodrdinates 
+        width_degrees = et[0] - dt[0]
+        height_degrees = dt[1] - et[1]
+        diff_w_start = (lon_start - dt[0])/width_degrees
+        diff_w_end = (lon_end - dt[0])/width_degrees
+        diff_h_start = (dt[1] - lat_start)/height_degrees
+        diff_h_end = (dt[1]- lat_end)/height_degrees
+
+        # min and max tile coordinates
         xmin = xy_start[0]
         ymin = xy_start[1]
         xmax = xy_end[0]
         ymax = xy_end[1]
-            
-        session = requests.Session()
-        total_width = (xmax+1 - xmin)*256
-        total_height = (ymax+1 - ymin)*256
-        new_im = Image.new('RGB', (total_width, total_height))
         
-        counts = (ymax - (ymin-1)) * ((xmax+1) - xmin)
-        step_pbar = 100/counts
-        step_counter = 0
-        files_list = [file_pil, final_file_out]
-        offset_y = 256
+        # total width and height of request field in pixels
+        total_width = (xmax+1 - xmin)*tileSize
+        total_height = (ymax+1 - ymin)*tileSize
+
+        # coordiantes for cropping
+        crop_bounds= [
+            total_width*diff_w_start,
+            total_height*diff_h_start,
+            total_width*diff_w_end,
+            total_height*diff_h_end
+        ]
+
+        # after image is cropped there will be new width and height
+        cropped_width = total_width*diff_w_end - total_width*diff_w_start
+        cropped_height = total_height*diff_h_end - total_height*diff_h_start
+
+        # image size is greater than 20000 pixels, ask user
+        # if he is ready for that
+        if any(dim_img > img_size_limit for dim_img in (cropped_height, cropped_width)):
+            answer = self.warning_question(cropped_width,cropped_height)
+            if answer == QMessageBox.No:
+                return
+
+        # blank image template
+        new_im = Image.new('RGB', (total_width, total_height))
+
+        # looping tile net
+        offset_y = tileSize
+        urls_stack = []
         for y_step in range(ymax, ymin-1, -1):
             offset_x = 0
             for x_step in range(xmin, xmax+1, 1):
@@ -494,56 +605,70 @@ class MapTileLoader(QWidget):
                     lnk_download = tile_url.format(quadkey)
                 else:
                     lnk_download = tile_url.format(x_step, y_step, zoom)
-                
                 file_out = os.path.join(self.work_folder, 'out_{}_{}.jpeg'.format(x_step, y_step))
-                
-                xy_orig = getxy_reverse(x_step, y_step, zoom, tileSize)
-                if 'yandex' in current_source.lower():
-                    xy_orig = yandex_coor_convert_reverse(x_step, y_step, zoom)
-                
-                step_counter+=step_pbar
-                self.pbar.setValue(step_counter)
-                
-                request = session.get(lnk_download, headers=headers)
-                if request.status_code == 404:
-                    img = Image.new("RGB", (256, 256), (255, 255, 255))
-                    img.save(file_out, "JPEG")
-                else:
-                    with open(file_out, 'wb') as out:
-                        out.write(request.content)
-                time.sleep(.2)
-                files_list.append(file_out)
-                
-                im_saved = Image.open(file_out)
-                new_im.paste(im_saved, (offset_x, total_height-offset_y))
-                offset_x += 256
-                QtCore.QCoreApplication.processEvents()
-            offset_y += 256
+                urls_stack.append([lnk_download, offset_x, offset_y, total_height, file_out])
+                offset_x += tileSize
+            offset_y += tileSize
             offset_x = 0
+
+        # progress bar counts
+        self.step_pbar = 100/len(urls_stack) if urls_stack else 100
+        self.step_counter = 0
+       
+        # multithread thing to download all tiles
+        session = requests.Session()
+        with ThreadPoolExecutor(None) as executor:
+            futures = [executor.submit(self.fetch, session, url[0], url[4])  for url in urls_stack]
+            for _ in as_completed(futures):
+                self.step_counter+=self.step_pbar
+                if abs(self.pbar.value())-int(self.step_counter)==-1:
+                    self.pbar.setValue(int(self.step_counter))
+                    QtCore.QCoreApplication.processEvents()
+        
+        # stitching tiles
+        self.stitch_image([[url[1], url[2], url[3], url[4]] for url in urls_stack], new_im)
+
+        # save raw image
         new_im.save(file_pil, quality=100)
-        gcps = [gdal.GCP(dt[0], dt[1], 0, 0, 0),
-            gdal.GCP(et[0], dt[1], 0, total_width, 0),
-            gdal.GCP(et[0], et[1], 0, total_width, total_height),
-            gdal.GCP(dt[0], et[1], 0, 0, total_height)
+
+        # crop image to rband bounds
+        new_im.crop((crop_bounds[0], crop_bounds[1], crop_bounds[2], crop_bounds[3])).save(file_pil_clip, quality=100)
+
+        # georeferencing points
+        gcps = [
+            gdal.GCP(lon_start_3857, lat_start_3857, 0, 0, 0),
+            gdal.GCP(lon_end_3857,   lat_start_3857, 0, cropped_width, 0),
+            gdal.GCP(lon_end_3857,   lat_end_3857,   0, cropped_width, cropped_height),
+            gdal.GCP(lon_start_3857, lat_end_3857,   0, 0, cropped_height)
         ]
-        ds = gdal.Translate(final_file_out, file_pil)
+
+        # georeferencing
+        ds = gdal.Translate(final_file_out, file_pil_clip)
         sr = osr.SpatialReference()
-        sr.ImportFromEPSG(4326) 
+        sr.ImportFromEPSG(3857) 
         ds.SetGCPs(gcps, sr.ExportToWkt())
         ds = None
-        window = (pnt_start.asPoint().x(), pnt_end.asPoint().y(), pnt_end.asPoint().x(), pnt_start.asPoint().y())
-        cropped_img = gdal.Warp(final_file_out_cropped, final_file_out, outputBounds = window, cropToCutline = True, copyMetadata = True)
-        cropped_img = None
-        self.pbar.setValue(0)
+
+        # add raster to project
         if self.add_checkbox.isChecked():
-            rlayer = QgsRasterLayer(final_file_out_cropped, '{}_{}'.format(current_source, f_name_pref))
+            rlayer = QgsRasterLayer(final_file_out, '{}_{}'.format(current_source, f_name_pref))
             QgsProject.instance().addMapLayer(rlayer)  
-        for file in files_list:
-            os.remove(file)
+
+        # remove all auxiliary files  
+        files_to_remove = [url[4] for url in  urls_stack] + [file_pil, file_pil_clip]
+        for file in files_to_remove:
+            if os.path.isfile(file):
+                # pass 
+                os.remove(file)
+
+        # save last map and zoom choice
         write_cfg(self.work_folder, zoom, current_source)
+        self.pbar.setValue(0)
+        QtCore.QCoreApplication.processEvents()
+        self.ready_message("Image from {} is ready.".format(current_source))
         return        
     
-
+    
     def save_frame(self):
         # save current drawn rectangle to *.xtnt file
         if self.draw_tool:
@@ -588,7 +713,6 @@ class MapTileLoader(QWidget):
                 self.draw_tool.startPoint = start_point_projected
                 self.draw_tool.endPoint = end_point_projected
             self.activate_dl()
-
         return
             
         
@@ -598,3 +722,4 @@ class MapTileLoader(QWidget):
             self.draw_tool.rubberBand.reset()
             self.draw_tool.deactivate()
             iface.mapCanvas().unsetMapTool(self.draw_tool) 
+            
